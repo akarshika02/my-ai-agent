@@ -7,8 +7,11 @@ import pandas as pd
 import requests
 import streamlit as st
 
+# --- Base Directory Resolution ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # --- Dynamically Load run 1.py ---
-RUN_1_PATH = os.path.join(os.path.dirname(__file__), "run 1.py")
+RUN_1_PATH = os.path.join(BASE_DIR, "run 1.py")
 if not os.path.exists(RUN_1_PATH):
     RUN_1_PATH = "run 1.py"
 
@@ -16,33 +19,87 @@ spec = importlib.util.spec_from_file_location("run_1", RUN_1_PATH)
 run_1 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(run_1)
 
+def get_template_df():
+    """
+    Finds, loads, or auto-generates the Blank File template DataFrame so the agent never fails.
+    """
+    # Session state uploaded file
+    if st.session_state.get("custom_blank_file_path") and os.path.exists(st.session_state["custom_blank_file_path"]):
+        try:
+            return pd.read_excel(st.session_state["custom_blank_file_path"]), st.session_state["custom_blank_file_path"]
+        except Exception:
+            pass
+            
+    candidates = [
+        os.path.join(BASE_DIR, "Blank File.xlsx"),
+        "Blank File.xlsx",
+        os.path.join(BASE_DIR, "uploaded_template_Blank File.xlsx"),
+        "uploaded_template_Blank File.xlsx"
+    ]
+    
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                df = pd.read_excel(path)
+                if not df.columns.empty:
+                    return df, path
+            except Exception:
+                continue
+                
+    # Auto-generate Blank File.xlsx if missing anywhere
+    fallback_path = os.path.join(BASE_DIR, "Blank File.xlsx")
+    headers = getattr(run_1, "EXCEL_HEADERS", [])
+    if not headers:
+        headers = [
+            "Date", "Year", "Month", "Date Posted", "Job ID LinkedIn", "Job ID Dexcom Page",
+            "Job Posting site", "Location", "Country", "US / OUS", "Business Function",
+            "Department", "Department from Dexcom Company Website", "Confidence Level",
+            "Job Title", "Fresh / reposted", "Dexcom Offers / Why Dexcom? / What you'll get",
+            "Summary / Position Summary / Meet the team / Role Summary",
+            "Essential Duties and Responsibilities / Where you come in",
+            "Supervisory Responsibilities",
+            "Required Qualifications / What makes you successful / Requirements / Essential Capabilities / Competencies / About you",
+            "Preferred Qualifications / Key Competencies", "Education Requirements and Experience",
+            "Travel Required", "Workplace Type", "Functional Description",
+            "Functional / Business Knowledge", "Scope", "Judgement", "Language Skills",
+            "Physical Demands", "Work Environment", "Points to Note", "Management",
+            "Field Sales", "Pay / Non-Exempt Salary Details / Commercial Salary Details / Exempt Salary Details",
+            "Shifts", "Direct URL of the Dexcom Job Page"
+        ]
+    df_auto = pd.DataFrame(columns=headers)
+    try:
+        df_auto.to_excel(fallback_path, index=False)
+    except Exception:
+        pass
+    return df_auto, "Auto-generated Blank File template"
+
 def safe_save_excel(df: pd.DataFrame, default_name: str = "job_postings_final.xlsx") -> tuple:
     """
     Safely save DataFrame to Excel, attempting fallback filenames if file is locked by Excel.
-    Returns (saved_filename, warning_message)
     """
     targets = [
+        os.path.join(BASE_DIR, default_name),
         default_name,
+        os.path.join(BASE_DIR, "job_postings.xlsx"),
         "job_postings.xlsx",
-        "job_postings_latest.xlsx",
-        f"job_postings_output_{int(time.time())}.xlsx"
+        os.path.join(BASE_DIR, f"job_postings_output_{int(time.time())}.xlsx")
     ]
     
     warning_msg = None
     for target in targets:
         try:
             df.to_excel(target, index=False)
-            if target != default_name:
-                warning_msg = f"⚠️ `{default_name}` is open in Excel. Output saved as `{target}` instead."
+            if os.path.basename(target) != default_name:
+                warning_msg = f"⚠️ `{default_name}` is open in Excel. Output saved as `{os.path.basename(target)}` instead."
             return target, warning_msg
         except PermissionError:
             continue
         except Exception:
             continue
             
-    timestamp_file = f"job_postings_output_{int(time.time())}.xlsx"
+    timestamp_file = os.path.join(BASE_DIR, f"job_postings_output_{int(time.time())}.xlsx")
     df.to_excel(timestamp_file, index=False)
-    return timestamp_file, f"⚠️ Output saved as `{timestamp_file}`."
+    return timestamp_file, f"⚠️ Output saved as `{os.path.basename(timestamp_file)}`."
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -88,16 +145,6 @@ st.markdown("""
         font-size: 0.88rem;
         line-height: 1.5;
     }
-    .step-badge {
-        background-color: #0284c7;
-        color: white;
-        padding: 4px 12px;
-        border-radius: 12px;
-        font-weight: 600;
-        font-size: 0.85rem;
-        display: inline-block;
-        margin-bottom: 0.5rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -109,11 +156,22 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# --- Sidebar Info ---
+# Load template DataFrame cleanly
+df_template_found, template_source = get_template_df()
+
+# --- Sidebar Controls & Custom Template Uploader ---
 with st.sidebar:
     st.header("⚙️ Agent Settings")
-    st.info("ℹ️ **Template File:** Automatically uses `Blank File.xlsx` in the workspace.")
-    st.info("ℹ️ **Input File Format:** Excel file with Date in Column A and LinkedIn URLs in Column B.")
+    st.success(f"✓ **Template Loaded:** `{os.path.basename(template_source)}` ({len(df_template_found.columns)} cols)")
+    
+    with st.expander("📤 Optional: Upload Custom Blank Template", expanded=False):
+        uploaded_custom_template = st.file_uploader("Upload custom template (.xlsx)", type=["xlsx", "xls"], key="custom_tpl_uploader")
+        if uploaded_custom_template is not None:
+            custom_path = os.path.join(BASE_DIR, f"uploaded_template_{uploaded_custom_template.name}")
+            with open(custom_path, "wb") as f:
+                f.write(uploaded_custom_template.getbuffer())
+            st.session_state["custom_blank_file_path"] = custom_path
+            st.rerun()
 
 # --- Session State Setup ---
 if "extracted_df" not in st.session_state:
@@ -123,19 +181,26 @@ if "output_excel_saved" not in st.session_state:
 if "excel_warning" not in st.session_state:
     st.session_state["excel_warning"] = None
 
-# --- Main 1-Click Interface ---
+# --- Main Interface ---
 st.subheader("1️⃣ Upload Input Excel File")
 uploaded_file = st.file_uploader("Choose an Excel file (.xlsx, .xls)", type=["xlsx", "xls"], key="single_file_uploader")
 
 input_file_path = None
 if uploaded_file is not None:
-    input_file_path = f"uploaded_{uploaded_file.name}"
+    input_file_path = os.path.join(BASE_DIR, f"uploaded_{uploaded_file.name}")
     with open(input_file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
     st.success(f"✓ Uploaded: `{uploaded_file.name}`")
-elif os.path.exists("Input1.xlsx"):
-    input_file_path = "Input1.xlsx"
-    st.info("💡 Default input file ready: `Input1.xlsx`")
+else:
+    default_candidates = [
+        os.path.join(BASE_DIR, "Input1.xlsx"),
+        "Input1.xlsx"
+    ]
+    for cand in default_candidates:
+        if os.path.exists(cand):
+            input_file_path = cand
+            st.info(f"💡 Default input file ready: `{os.path.basename(cand)}`")
+            break
 
 if input_file_path and os.path.exists(input_file_path):
     df_preview = pd.read_excel(input_file_path)
@@ -168,24 +233,19 @@ if input_file_path and os.path.exists(input_file_path):
             
         # STEP A: Convert Excel to TXT
         step_status.markdown("🔄 **Step 1/4:** Converting Excel input file to `output.txt`...")
-        add_log(f"Reading input file `{input_file_path}` ({len(df_preview)} rows)...")
+        add_log(f"Reading input file `{os.path.basename(input_file_path)}` ({len(df_preview)} rows)...")
         
-        output_txt_path = "output.txt"
+        output_txt_path = os.path.join(BASE_DIR, "output.txt")
         df_preview.to_csv(output_txt_path, sep="\t", index=False)
-        add_log(f"✓ Successfully converted Excel input to `{output_txt_path}`.")
-        time.sleep(0.5)
+        add_log("✓ Successfully converted Excel input to tab-delimited format.")
+        time.sleep(0.4)
         
         # STEP B: Load Blank File Template
-        step_status.markdown("📋 **Step 2/4:** Loading template structure from `Blank File.xlsx`...")
-        blank_template_path = "Blank File.xlsx"
-        if not os.path.exists(blank_template_path):
-            st.error("Error: `Blank File.xlsx` not found in workspace!")
-            st.stop()
-            
-        df_blank = pd.read_excel(blank_template_path)
+        step_status.markdown("📋 **Step 2/4:** Loading output template structure...")
+        df_blank, template_source_used = get_template_df()
         template_cols = list(df_blank.columns)
-        add_log(f"✓ Loaded template with {len(template_cols)} parameter columns.")
-        time.sleep(0.5)
+        add_log(f"✓ Loaded output template from `{os.path.basename(template_source_used)}` ({len(template_cols)} parameter columns).")
+        time.sleep(0.4)
         
         # STEP C: Parse TXT and Run Extraction Code
         step_status.markdown("⚡ **Step 3/4:** Executing `run 1.py` extraction code on job URLs...")
@@ -247,7 +307,7 @@ if input_file_path and os.path.exists(input_file_path):
         met4.metric("Fresh Jobs", fresh_cnt)
         
         # STEP D: Populate Template & Output Excel File
-        step_status.markdown("📥 **Step 4/4:** Formatting output matching `Blank File.xlsx` structure...")
+        step_status.markdown("📥 **Step 4/4:** Formatting output matching template structure...")
         df_extracted = pd.DataFrame(final_records)
         
         for col in template_cols:
@@ -272,7 +332,7 @@ if input_file_path and os.path.exists(input_file_path):
         st.session_state["excel_warning"] = warning_text
         
         step_status.markdown("✅ **Extraction Completed Successfully!**")
-        add_log(f"🎉 Successfully populated {len(df_final)} rows into `{saved_file}`!")
+        add_log(f"🎉 Successfully populated {len(df_final)} rows into `{os.path.basename(saved_file)}`!")
         st.balloons()
         
 # --- Download & Results Section ---
@@ -283,7 +343,7 @@ if st.session_state["extracted_df"] is not None:
     if st.session_state.get("excel_warning"):
         st.warning(st.session_state["excel_warning"])
         
-    excel_path = st.session_state.get("output_excel_saved") or "job_postings_final.xlsx"
+    excel_path = st.session_state.get("output_excel_saved") or os.path.join(BASE_DIR, "job_postings_final.xlsx")
     if os.path.exists(excel_path):
         with open(excel_path, "rb") as f:
             bytes_data = f.read()
